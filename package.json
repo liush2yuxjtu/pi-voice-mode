@@ -1,0 +1,61 @@
+{
+  "name": "pi-voice-mode",
+  "version": "0.1.0",
+  "description": "为 Pi 增加全局 /voice 开关，让模型可靠理解 Typeless 等外部语音转写输入。",
+  "type": "module",
+  "license": "MIT",
+  "author": "Liu Shiyu",
+  "homepage": "https://github.com/liush2yuxjtu/pi-voice-mode#readme",
+  "bugs": {
+    "url": "https://github.com/liush2yuxjtu/pi-voice-mode/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/liush2yuxjtu/pi-voice-mode.git"
+  },
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "pi",
+    "voice",
+    "dictation",
+    "speech-to-text",
+    "typeless",
+    "accessibility"
+  ],
+  "files": [
+    "extensions",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "test": "node --experimental-strip-types --test tests/*.test.mjs",
+    "typecheck": "tsc --noEmit",
+    "check": "npm run typecheck && npm test",
+    "pack:check": "npm pack --dry-run --json"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions/voice-mode.ts"
+    ]
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.84.3",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.9.0"
+  }
+}
