@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, open, readdir, rm, stat, writeFile } from "node:fs/promises";
+
+const TOGGLE_FILE_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.toggle$/i;
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -9,7 +11,7 @@ import registerVoiceMode from "../extensions/voice-mode.ts";
 
 async function listToggleFiles(stateDirectoryPath) {
 	try {
-		return (await readdir(stateDirectoryPath)).filter((name) => name.endsWith(".toggle")).sort();
+		return (await readdir(stateDirectoryPath)).filter((name) => TOGGLE_FILE_PATTERN.test(name)).sort();
 	} catch (error) {
 		if (error?.code === "ENOENT") return [];
 		throw error;
@@ -47,7 +49,6 @@ async function createHarness(sharedStateDirectoryPath) {
 
 	registerVoiceMode(pi, {
 		stateDirectoryPath,
-		stateFilePath: stateDirectoryPath,
 		reportError(message, error) {
 			loggedErrors.push({ message, error });
 		},
@@ -221,6 +222,7 @@ test("状态目录中的无关或损坏文件会被忽略，不会阻止 /voice 
 	t.after(harness.cleanup);
 	await mkdir(harness.stateDirectoryPath, { recursive: true });
 	await writeFile(join(harness.stateDirectoryPath, "not-a-toggle.json"), "not-json");
+	await writeFile(join(harness.stateDirectoryPath, "not-a-toggle.toggle"), "not-json");
 
 	await assert.doesNotReject(harness.emit("session_start"));
 	assert.equal(harness.statuses.at(-1).value, "🔇");
@@ -235,6 +237,7 @@ test("状态目录和切换事件在支持权限位的平台上保持私有", as
 	if (process.platform === "win32") t.skip("Windows 不提供相同的权限位语义");
 	const harness = await createHarness();
 	t.after(harness.cleanup);
+	await mkdir(harness.stateDirectoryPath, { mode: 0o755, recursive: true });
 
 	await harness.command.handler("", harness.ctx);
 	const [toggleFile] = await listToggleFiles(harness.stateDirectoryPath);
