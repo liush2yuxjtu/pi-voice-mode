@@ -1,14 +1,14 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
 import registerVoiceMode from "../extensions/voice-mode.ts";
 
-async function createHarness() {
-	const directory = await mkdtemp(join(tmpdir(), "pi-voice-mode-"));
-	const stateFilePath = join(directory, "state.json");
+async function createHarness(sharedStateFilePath) {
+	const directory = sharedStateFilePath ? undefined : await mkdtemp(join(tmpdir(), "pi-voice-mode-"));
+	const stateFilePath = sharedStateFilePath ?? join(directory, "state.json");
 	const commands = new Map();
 	const handlers = new Map();
 	const notifications = [];
@@ -58,7 +58,7 @@ async function createHarness() {
 	}
 
 	return {
-		cleanup: () => rm(directory, { force: true, recursive: true }),
+		cleanup: () => (directory ? rm(directory, { force: true, recursive: true }) : Promise.resolve()),
 		command: commands.get("voice"),
 		ctx,
 		emit,
@@ -122,16 +122,15 @@ test("开启后为每一轮注入 Typeless 转写容错提示", async (t) => {
 	assert.match(result.systemPrompt, /不要.*复述|无需.*复述/);
 });
 
-test("一个会话开启后，其他会话和重启后的 Pi 都能读取全局状态", async (t) => {
-	const first = await createHarness();
-	t.after(first.cleanup);
+test("一个会话开启后，其他会话和重启后的 Pi 都能读取同一份全局状态", async (t) => {
+	const directory = await mkdtemp(join(tmpdir(), "pi-voice-mode-shared-"));
+	t.after(() => rm(directory, { force: true, recursive: true }));
+	const stateFilePath = join(directory, "state.json");
+	const first = await createHarness(stateFilePath);
+	const second = await createHarness(stateFilePath);
+
 	await first.emit("session_start");
 	await first.command.handler("", first.ctx);
-
-	const secondDirectoryState = await readFile(first.stateFilePath, "utf8");
-	const second = await createHarness();
-	t.after(second.cleanup);
-	await writeFile(second.stateFilePath, secondDirectoryState);
 	await second.emit("session_start");
 
 	assert.equal(second.statuses.at(-1).value, "🎙");
@@ -140,6 +139,25 @@ test("一个会话开启后，其他会话和重启后的 Pi 都能读取全局�
 		systemPrompt: "BASE",
 	});
 	assert.match(result.systemPrompt, /Typeless/);
+});
+
+test("并行 Pi 会话同时切换时不会丢失任何一次取反", async (t) => {
+	const directory = await mkdtemp(join(tmpdir(), "pi-voice-mode-concurrent-"));
+	t.after(() => rm(directory, { force: true, recursive: true }));
+	const stateFilePath = join(directory, "state.json");
+	const first = await createHarness(stateFilePath);
+	const second = await createHarness(stateFilePath);
+
+	await Promise.all([
+		first.command.handler("", first.ctx),
+		second.command.handler("", second.ctx),
+	]);
+
+	assert.deepEqual(JSON.parse(await readFile(stateFilePath, "utf8")), { enabled: false });
+	await first.emit("before_agent_start", { prompt: "同步", systemPrompt: "BASE" });
+	await second.emit("before_agent_start", { prompt: "同步", systemPrompt: "BASE" });
+	assert.equal(first.statuses.at(-1).value, "🔇");
+	assert.equal(second.statuses.at(-1).value, "🔇");
 });
 
 test("每轮开始前重新读取全局状态，避免并行 Pi 会话使用旧值", async (t) => {
@@ -176,7 +194,7 @@ test("/voice 后误带文本时不切换，也不把文本当成请求发送", a
 	);
 });
 
-test("损坏的状态文件不会让 Pi 启动失败", async (t) => {
+test("损坏的状态文件不会让 Pi 启动失败，并能用下一次 /voice 自动修复", async (t) => {
 	const harness = await createHarness();
 	t.after(harness.cleanup);
 	await writeFile(harness.stateFilePath, "not-json");
@@ -185,4 +203,17 @@ test("损坏的状态文件不会让 Pi 启动失败", async (t) => {
 	assert.equal(harness.statuses.at(-1).value, "🔇");
 	assert.equal(harness.notifications.at(-1).message, "⚠️🎙");
 	assert.equal(harness.loggedErrors.length, 1);
+
+	await harness.command.handler("", harness.ctx);
+	assert.deepEqual(JSON.parse(await readFile(harness.stateFilePath, "utf8")), { enabled: true });
+	assert.equal(harness.statuses.at(-1).value, "🎙");
+});
+
+test("持久化文件在支持权限位的平台上只允许当前用户读写", async (t) => {
+	if (process.platform === "win32") t.skip("Windows 不提供相同的权限位语义");
+	const harness = await createHarness();
+	t.after(harness.cleanup);
+
+	await harness.command.handler("", harness.ctx);
+	assert.equal((await stat(harness.stateFilePath)).mode & 0o777, 0o600);
 });
