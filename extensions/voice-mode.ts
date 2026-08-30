@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, open, readdir } from "node:fs/promises";
+import { chmod, mkdir, open, readdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -10,6 +10,7 @@ const DISABLED_ICON = "🔇";
 const ERROR_ICON = "⚠️🎙";
 const STATE_DIRECTORY_NAME = "pi-voice-mode";
 const TOGGLE_FILE_SUFFIX = ".toggle";
+const TOGGLE_FILE_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.toggle$/i;
 const TOGGLE_CREATE_ATTEMPTS = 3;
 
 const VOICE_MODE_PROMPT = `
@@ -56,7 +57,7 @@ async function readVoiceMode(stateDirectoryPath: string): Promise<boolean> {
 	try {
 		const entries = await readdir(stateDirectoryPath, { withFileTypes: true });
 		const toggleCount = entries.filter(
-			(entry) => entry.isFile() && entry.name.endsWith(TOGGLE_FILE_SUFFIX),
+			(entry) => entry.isFile() && TOGGLE_FILE_PATTERN.test(entry.name),
 		).length;
 		return toggleCount % 2 === 1;
 	} catch (error) {
@@ -67,6 +68,7 @@ async function readVoiceMode(stateDirectoryPath: string): Promise<boolean> {
 
 async function appendToggleEvent(stateDirectoryPath: string): Promise<void> {
 	await mkdir(stateDirectoryPath, { recursive: true, mode: 0o700 });
+	if (process.platform !== "win32") await chmod(stateDirectoryPath, 0o700);
 	for (let attempt = 0; attempt < TOGGLE_CREATE_ATTEMPTS; attempt++) {
 		const eventPath = join(stateDirectoryPath, `${randomUUID()}${TOGGLE_FILE_SUFFIX}`);
 		try {

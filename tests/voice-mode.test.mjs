@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, open, readdir, rm, stat, writeFile } from "node:fs/promises";
-
-const TOGGLE_FILE_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.toggle$/i;
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
 import registerVoiceMode from "../extensions/voice-mode.ts";
+
+const TOGGLE_FILE_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.toggle$/i;
 
 async function listToggleFiles(stateDirectoryPath) {
 	try {
