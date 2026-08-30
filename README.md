@@ -72,13 +72,13 @@ pi install git:github.com/liush2yuxjtu/pi-voice-mode
 - 不发送网络请求。
 - 不包含遥测。
 
-它只保存一个本地布尔值，并在开启时调整 Pi 的系统提示。状态文件默认为：
+它只在本地保存零字节的切换事件，并在开启时调整 Pi 的系统提示。当前状态由事件数量的奇偶性决定，因此多个 Pi 会话同时执行 `/voice` 也不会相互覆盖。状态目录默认为：
 
 ```text
-~/.pi/agent/pi-voice-mode.json
+~/.pi/agent/pi-voice-mode/
 ```
 
-如果设置了 `PI_CODING_AGENT_DIR`，状态文件会跟随该目录。
+如果设置了 `PI_CODING_AGENT_DIR`，状态目录会跟随该目录。
 
 ## 与录音类扩展的区别
 
