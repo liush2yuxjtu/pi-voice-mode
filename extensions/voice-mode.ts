@@ -1,18 +1,16 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, open, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, open, readdir } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
-import { setTimeout as delay } from "node:timers/promises";
+import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 const STATUS_KEY = "pi-voice-mode";
 const ENABLED_ICON = "🎙";
 const DISABLED_ICON = "🔇";
 const ERROR_ICON = "⚠️🎙";
-const STATE_FILE_NAME = "pi-voice-mode.json";
-const LOCK_TIMEOUT_MS = 5_000;
-const LOCK_STALE_MS = 30_000;
-const LOCK_RETRY_MS = 25;
+const STATE_DIRECTORY_NAME = "pi-voice-mode";
+const TOGGLE_FILE_SUFFIX = ".toggle";
+const TOGGLE_CREATE_ATTEMPTS = 3;
 
 const VOICE_MODE_PROMPT = `
 <voice_input_mode>
@@ -34,32 +32,15 @@ const VOICE_MODE_PROMPT = `
 </voice_input_mode>
 `.trim();
 
-interface VoiceModeState {
-	enabled: boolean;
-}
-
 interface VoiceModeOptions {
-	stateFilePath?: string;
+	stateDirectoryPath?: string;
 	reportError?: (message: string, error: unknown) => void;
 }
 
-interface LockRecord {
-	token: string;
-	pid: number;
-	createdAt: number;
-}
-
-class InvalidStateError extends Error {
-	constructor(cause?: unknown) {
-		super("Invalid pi-voice-mode state", { cause });
-		this.name = "InvalidStateError";
-	}
-}
-
-function getDefaultStateFilePath(): string {
+function getDefaultStateDirectoryPath(): string {
 	const configuredAgentDir = process.env.PI_CODING_AGENT_DIR?.trim();
 	const agentDir = configuredAgentDir || join(homedir(), ".pi", "agent");
-	return join(agentDir, STATE_FILE_NAME);
+	return join(agentDir, STATE_DIRECTORY_NAME);
 }
 
 function isErrorCode(error: unknown, code: string): boolean {
@@ -71,113 +52,32 @@ function isErrorCode(error: unknown, code: string): boolean {
 	);
 }
 
-function parseState(rawState: string): VoiceModeState {
-	let parsed: unknown;
+async function readVoiceMode(stateDirectoryPath: string): Promise<boolean> {
 	try {
-		parsed = JSON.parse(rawState);
-	} catch (error) {
-		throw new InvalidStateError(error);
-	}
-	if (
-		typeof parsed !== "object" ||
-		parsed === null ||
-		!("enabled" in parsed) ||
-		typeof (parsed as { enabled?: unknown }).enabled !== "boolean"
-	) {
-		throw new InvalidStateError();
-	}
-	return { enabled: (parsed as { enabled: boolean }).enabled };
-}
-
-async function readVoiceMode(stateFilePath: string): Promise<boolean> {
-	try {
-		return parseState(await readFile(stateFilePath, "utf8")).enabled;
+		const entries = await readdir(stateDirectoryPath, { withFileTypes: true });
+		const toggleCount = entries.filter(
+			(entry) => entry.isFile() && entry.name.endsWith(TOGGLE_FILE_SUFFIX),
+		).length;
+		return toggleCount % 2 === 1;
 	} catch (error) {
 		if (isErrorCode(error, "ENOENT")) return false;
 		throw error;
 	}
 }
 
-async function writeVoiceMode(stateFilePath: string, enabled: boolean): Promise<void> {
-	await mkdir(dirname(stateFilePath), { recursive: true });
-	const temporaryPath = `${stateFilePath}.${process.pid}.${randomUUID()}.tmp`;
-	try {
-		await writeFile(temporaryPath, `${JSON.stringify({ enabled }, null, 2)}\n`, {
-			encoding: "utf8",
-			mode: 0o600,
-		});
-		await rename(temporaryPath, stateFilePath);
-	} finally {
-		await rm(temporaryPath, { force: true }).catch(() => undefined);
-	}
-}
-
-function isProcessAlive(pid: number): boolean {
-	try {
-		process.kill(pid, 0);
-		return true;
-	} catch (error) {
-		return !isErrorCode(error, "ESRCH");
-	}
-}
-
-async function removeStaleLock(lockFilePath: string): Promise<void> {
-	let lockStats;
-	try {
-		lockStats = await stat(lockFilePath);
-	} catch (error) {
-		if (isErrorCode(error, "ENOENT")) return;
-		throw error;
-	}
-	if (Date.now() - lockStats.mtimeMs < LOCK_STALE_MS) return;
-
-	let lockOwnerIsAlive = false;
-	try {
-		const lockRecord = JSON.parse(await readFile(lockFilePath, "utf8")) as Partial<LockRecord>;
-		lockOwnerIsAlive = typeof lockRecord.pid === "number" && isProcessAlive(lockRecord.pid);
-	} catch {
-		lockOwnerIsAlive = false;
-	}
-	if (!lockOwnerIsAlive) await rm(lockFilePath, { force: true });
-}
-
-async function withStateLock<T>(stateFilePath: string, operation: () => Promise<T>): Promise<T> {
-	const lockFilePath = `${stateFilePath}.lock`;
-	const deadline = Date.now() + LOCK_TIMEOUT_MS;
-	const token = randomUUID();
-	await mkdir(dirname(stateFilePath), { recursive: true });
-
-	let lockHandle;
-	while (!lockHandle) {
+async function appendToggleEvent(stateDirectoryPath: string): Promise<void> {
+	await mkdir(stateDirectoryPath, { recursive: true, mode: 0o700 });
+	for (let attempt = 0; attempt < TOGGLE_CREATE_ATTEMPTS; attempt++) {
+		const eventPath = join(stateDirectoryPath, `${randomUUID()}${TOGGLE_FILE_SUFFIX}`);
 		try {
-			const candidateHandle = await open(lockFilePath, "wx", 0o600);
-			try {
-				await candidateHandle.writeFile(JSON.stringify({ token, pid: process.pid, createdAt: Date.now() }));
-				lockHandle = candidateHandle;
-			} catch (error) {
-				await candidateHandle.close().catch(() => undefined);
-				await rm(lockFilePath, { force: true }).catch(() => undefined);
-				throw error;
-			}
+			const handle = await open(eventPath, "wx", 0o600);
+			await handle.close();
+			return;
 		} catch (error) {
 			if (!isErrorCode(error, "EEXIST")) throw error;
-			await removeStaleLock(lockFilePath);
-			if (Date.now() >= deadline) throw new Error("Timed out waiting for pi-voice-mode state lock");
-			await delay(LOCK_RETRY_MS + Math.floor(Math.random() * LOCK_RETRY_MS));
 		}
 	}
-
-	try {
-		return await operation();
-	} finally {
-		await lockHandle.close();
-		try {
-			const currentLock = JSON.parse(await readFile(lockFilePath, "utf8")) as Partial<LockRecord>;
-			if (currentLock.token === token) await rm(lockFilePath, { force: true });
-		} catch (error) {
-			if (!isErrorCode(error, "ENOENT")) throw error;
-		}
-	}
+	throw new Error("Unable to allocate a unique pi-voice-mode toggle event");
 }
 
 function errorSignature(error: unknown): string {
@@ -186,7 +86,7 @@ function errorSignature(error: unknown): string {
 }
 
 export default function registerVoiceMode(pi: ExtensionAPI, options: VoiceModeOptions = {}): void {
-	const stateFilePath = options.stateFilePath ?? getDefaultStateFilePath();
+	const stateDirectoryPath = options.stateDirectoryPath ?? getDefaultStateDirectoryPath();
 	const reportError = options.reportError ?? ((message, error) => console.error(message, error));
 	let lastReportedError: string | undefined;
 
@@ -196,17 +96,17 @@ export default function registerVoiceMode(pi: ExtensionAPI, options: VoiceModeOp
 		ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg(color, icon));
 	}
 
-	function reportStateError(ctx: ExtensionContext, error: unknown, deduplicate = true): void {
+	function reportStateError(ctx: ExtensionContext, error: unknown): void {
 		const signature = errorSignature(error);
-		if (deduplicate && signature === lastReportedError) return;
+		if (signature === lastReportedError) return;
 		lastReportedError = signature;
-		reportError(`[pi-voice-mode] 无法读取或保存状态文件：${stateFilePath}`, error);
+		reportError(`[pi-voice-mode] 无法读取或保存状态目录：${stateDirectoryPath}`, error);
 		ctx.ui.notify(ERROR_ICON, "warning");
 	}
 
 	async function refreshFromDisk(ctx: ExtensionContext): Promise<boolean> {
 		try {
-			const enabled = await readVoiceMode(stateFilePath);
+			const enabled = await readVoiceMode(stateDirectoryPath);
 			lastReportedError = undefined;
 			updateStatus(ctx, enabled);
 			return enabled;
@@ -226,24 +126,13 @@ export default function registerVoiceMode(pi: ExtensionAPI, options: VoiceModeOp
 			}
 
 			try {
-				const nextState = await withStateLock(stateFilePath, async () => {
-					let currentState: boolean;
-					try {
-						currentState = await readVoiceMode(stateFilePath);
-					} catch (error) {
-						if (!(error instanceof InvalidStateError)) throw error;
-						reportStateError(ctx, error);
-						currentState = false;
-					}
-					const next = !currentState;
-					await writeVoiceMode(stateFilePath, next);
-					return next;
-				});
+				await appendToggleEvent(stateDirectoryPath);
+				const enabled = await readVoiceMode(stateDirectoryPath);
 				lastReportedError = undefined;
-				updateStatus(ctx, nextState);
-				ctx.ui.notify(nextState ? ENABLED_ICON : DISABLED_ICON, "info");
+				updateStatus(ctx, enabled);
+				ctx.ui.notify(enabled ? ENABLED_ICON : DISABLED_ICON, "info");
 			} catch (error) {
-				reportStateError(ctx, error, false);
+				reportStateError(ctx, error);
 				await refreshFromDisk(ctx);
 			}
 		},
