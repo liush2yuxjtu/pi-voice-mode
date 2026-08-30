@@ -1,14 +1,34 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { mkdir, mkdtemp, open, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
 import registerVoiceMode from "../extensions/voice-mode.ts";
 
-async function createHarness(sharedStateFilePath) {
-	const directory = sharedStateFilePath ? undefined : await mkdtemp(join(tmpdir(), "pi-voice-mode-"));
-	const stateFilePath = sharedStateFilePath ?? join(directory, "state.json");
+async function listToggleFiles(stateDirectoryPath) {
+	try {
+		return (await readdir(stateDirectoryPath)).filter((name) => name.endsWith(".toggle")).sort();
+	} catch (error) {
+		if (error?.code === "ENOENT") return [];
+		throw error;
+	}
+}
+
+async function readPersistedMode(stateDirectoryPath) {
+	return (await listToggleFiles(stateDirectoryPath)).length % 2 === 1;
+}
+
+async function createToggleEvent(stateDirectoryPath) {
+	await mkdir(stateDirectoryPath, { recursive: true });
+	const handle = await open(join(stateDirectoryPath, `${randomUUID()}.toggle`), "wx", 0o600);
+	await handle.close();
+}
+
+async function createHarness(sharedStateDirectoryPath) {
+	const directory = sharedStateDirectoryPath ? undefined : await mkdtemp(join(tmpdir(), "pi-voice-mode-"));
+	const stateDirectoryPath = sharedStateDirectoryPath ?? join(directory, "state");
 	const commands = new Map();
 	const handlers = new Map();
 	const notifications = [];
@@ -26,7 +46,8 @@ async function createHarness(sharedStateFilePath) {
 	};
 
 	registerVoiceMode(pi, {
-		stateFilePath,
+		stateDirectoryPath,
+		stateFilePath: stateDirectoryPath,
 		reportError(message, error) {
 			loggedErrors.push({ message, error });
 		},
@@ -64,12 +85,12 @@ async function createHarness(sharedStateFilePath) {
 		emit,
 		loggedErrors,
 		notifications,
-		stateFilePath,
+		stateDirectoryPath,
 		statuses,
 	};
 }
 
-test("/voice 是无参数的全局开关，并把状态持久化到 Pi 配置目录", async (t) => {
+test("/voice 是无参数的全局开关，并把每次切换持久化为唯一事件", async (t) => {
 	const harness = await createHarness();
 	t.after(harness.cleanup);
 
@@ -82,12 +103,14 @@ test("/voice 是无参数的全局开关，并把状态持久化到 Pi 配置目
 	await harness.command.handler("   ", harness.ctx);
 	assert.equal(harness.statuses.at(-1).value, "🎙");
 	assert.equal(harness.notifications.at(-1).message, "🎙");
-	assert.deepEqual(JSON.parse(await readFile(harness.stateFilePath, "utf8")), { enabled: true });
+	assert.equal(await readPersistedMode(harness.stateDirectoryPath), true);
+	assert.equal((await listToggleFiles(harness.stateDirectoryPath)).length, 1);
 
 	await harness.command.handler("", harness.ctx);
 	assert.equal(harness.statuses.at(-1).value, "🔇");
 	assert.equal(harness.notifications.at(-1).message, "🔇");
-	assert.deepEqual(JSON.parse(await readFile(harness.stateFilePath, "utf8")), { enabled: false });
+	assert.equal(await readPersistedMode(harness.stateDirectoryPath), false);
+	assert.equal((await listToggleFiles(harness.stateDirectoryPath)).length, 2);
 });
 
 test("状态栏只显示图标，不显示中文或英文", async (t) => {
@@ -125,9 +148,9 @@ test("开启后为每一轮注入 Typeless 转写容错提示", async (t) => {
 test("一个会话开启后，其他会话和重启后的 Pi 都能读取同一份全局状态", async (t) => {
 	const directory = await mkdtemp(join(tmpdir(), "pi-voice-mode-shared-"));
 	t.after(() => rm(directory, { force: true, recursive: true }));
-	const stateFilePath = join(directory, "state.json");
-	const first = await createHarness(stateFilePath);
-	const second = await createHarness(stateFilePath);
+	const stateDirectoryPath = join(directory, "state");
+	const first = await createHarness(stateDirectoryPath);
+	const second = await createHarness(stateDirectoryPath);
 
 	await first.emit("session_start");
 	await first.command.handler("", first.ctx);
@@ -141,23 +164,22 @@ test("一个会话开启后，其他会话和重启后的 Pi 都能读取同一�
 	assert.match(result.systemPrompt, /Typeless/);
 });
 
-test("并行 Pi 会话同时切换时不会丢失任何一次取反", async (t) => {
+test("大量并行 /voice 操作不会丢失任何一次切换", async (t) => {
 	const directory = await mkdtemp(join(tmpdir(), "pi-voice-mode-concurrent-"));
 	t.after(() => rm(directory, { force: true, recursive: true }));
-	const stateFilePath = join(directory, "state.json");
-	const first = await createHarness(stateFilePath);
-	const second = await createHarness(stateFilePath);
+	const stateDirectoryPath = join(directory, "state");
+	const harnesses = await Promise.all(
+		Array.from({ length: 20 }, () => createHarness(stateDirectoryPath)),
+	);
 
-	await Promise.all([
-		first.command.handler("", first.ctx),
-		second.command.handler("", second.ctx),
-	]);
+	await Promise.all(harnesses.map((harness) => harness.command.handler("", harness.ctx)));
 
-	assert.deepEqual(JSON.parse(await readFile(stateFilePath, "utf8")), { enabled: false });
-	await first.emit("before_agent_start", { prompt: "同步", systemPrompt: "BASE" });
-	await second.emit("before_agent_start", { prompt: "同步", systemPrompt: "BASE" });
-	assert.equal(first.statuses.at(-1).value, "🔇");
-	assert.equal(second.statuses.at(-1).value, "🔇");
+	assert.equal((await listToggleFiles(stateDirectoryPath)).length, 20);
+	assert.equal(await readPersistedMode(stateDirectoryPath), false);
+	for (const harness of harnesses) {
+		await harness.emit("before_agent_start", { prompt: "同步", systemPrompt: "BASE" });
+		assert.equal(harness.statuses.at(-1).value, "🔇");
+	}
 });
 
 test("每轮开始前重新读取全局状态，避免并行 Pi 会话使用旧值", async (t) => {
@@ -166,7 +188,7 @@ test("每轮开始前重新读取全局状态，避免并行 Pi 会话使用旧�
 	await harness.emit("session_start");
 	assert.equal(harness.statuses.at(-1).value, "🔇");
 
-	await writeFile(harness.stateFilePath, '{"enabled":true}\n');
+	await createToggleEvent(harness.stateDirectoryPath);
 	const result = await harness.emit("before_agent_start", {
 		prompt: "外部会话已经开启",
 		systemPrompt: "BASE",
@@ -184,7 +206,7 @@ test("/voice 后误带文本时不切换，也不把文本当成请求发送", a
 
 	assert.equal(harness.notifications.at(-1).level, "warning");
 	assert.equal(harness.notifications.at(-1).message, "⚠️ /voice");
-	assert.rejects(readFile(harness.stateFilePath, "utf8"), { code: "ENOENT" });
+	assert.equal((await listToggleFiles(harness.stateDirectoryPath)).length, 0);
 	assert.equal(
 		await harness.emit("before_agent_start", {
 			prompt: "普通输入",
@@ -194,26 +216,28 @@ test("/voice 后误带文本时不切换，也不把文本当成请求发送", a
 	);
 });
 
-test("损坏的状态文件不会让 Pi 启动失败，并能用下一次 /voice 自动修复", async (t) => {
+test("状态目录中的无关或损坏文件会被忽略，不会阻止 /voice 自助恢复", async (t) => {
 	const harness = await createHarness();
 	t.after(harness.cleanup);
-	await writeFile(harness.stateFilePath, "not-json");
+	await mkdir(harness.stateDirectoryPath, { recursive: true });
+	await writeFile(join(harness.stateDirectoryPath, "not-a-toggle.json"), "not-json");
 
 	await assert.doesNotReject(harness.emit("session_start"));
 	assert.equal(harness.statuses.at(-1).value, "🔇");
-	assert.equal(harness.notifications.at(-1).message, "⚠️🎙");
-	assert.equal(harness.loggedErrors.length, 1);
+	assert.equal(harness.loggedErrors.length, 0);
 
 	await harness.command.handler("", harness.ctx);
-	assert.deepEqual(JSON.parse(await readFile(harness.stateFilePath, "utf8")), { enabled: true });
+	assert.equal(await readPersistedMode(harness.stateDirectoryPath), true);
 	assert.equal(harness.statuses.at(-1).value, "🎙");
 });
 
-test("持久化文件在支持权限位的平台上只允许当前用户读写", async (t) => {
+test("状态目录和切换事件在支持权限位的平台上保持私有", async (t) => {
 	if (process.platform === "win32") t.skip("Windows 不提供相同的权限位语义");
 	const harness = await createHarness();
 	t.after(harness.cleanup);
 
 	await harness.command.handler("", harness.ctx);
-	assert.equal((await stat(harness.stateFilePath)).mode & 0o777, 0o600);
+	const [toggleFile] = await listToggleFiles(harness.stateDirectoryPath);
+	assert.equal((await stat(harness.stateDirectoryPath)).mode & 0o777, 0o700);
+	assert.equal((await stat(join(harness.stateDirectoryPath, toggleFile))).mode & 0o777, 0o600);
 });
