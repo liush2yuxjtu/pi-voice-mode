@@ -78,7 +78,7 @@ pi install git:github.com/liush2yuxjtu/pi-voice-mode
 ~/.pi/agent/pi-voice-mode/
 ```
 
-如果设置了 `PI_CODING_AGENT_DIR`，状态目录会跟随该目录。
+如果设置了 `PI_CODING_AGENT_DIR`，状态目录会跟随该目录。每次切换会新增一个零字节事件文件；扩展不在线压缩这些事件，以避免重新引入并发锁。正常开关频率下占用可以忽略。
 
 ## 与录音类扩展的区别
 
