@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 const STATUS_KEY = "pi-voice-mode";
@@ -9,6 +10,9 @@ const ENABLED_ICON = "🎙";
 const DISABLED_ICON = "🔇";
 const ERROR_ICON = "⚠️🎙";
 const STATE_FILE_NAME = "pi-voice-mode.json";
+const LOCK_TIMEOUT_MS = 5_000;
+const LOCK_STALE_MS = 30_000;
+const LOCK_RETRY_MS = 25;
 
 const VOICE_MODE_PROMPT = `
 <voice_input_mode>
@@ -39,6 +43,19 @@ interface VoiceModeOptions {
 	reportError?: (message: string, error: unknown) => void;
 }
 
+interface LockRecord {
+	token: string;
+	pid: number;
+	createdAt: number;
+}
+
+class InvalidStateError extends Error {
+	constructor(cause?: unknown) {
+		super("Invalid pi-voice-mode state", { cause });
+		this.name = "InvalidStateError";
+	}
+}
+
 function getDefaultStateFilePath(): string {
 	const configuredAgentDir = process.env.PI_CODING_AGENT_DIR?.trim();
 	const agentDir = configuredAgentDir || join(homedir(), ".pi", "agent");
@@ -55,14 +72,19 @@ function isErrorCode(error: unknown, code: string): boolean {
 }
 
 function parseState(rawState: string): VoiceModeState {
-	const parsed: unknown = JSON.parse(rawState);
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(rawState);
+	} catch (error) {
+		throw new InvalidStateError(error);
+	}
 	if (
 		typeof parsed !== "object" ||
 		parsed === null ||
 		!("enabled" in parsed) ||
 		typeof (parsed as { enabled?: unknown }).enabled !== "boolean"
 	) {
-		throw new Error("Invalid pi-voice-mode state");
+		throw new InvalidStateError();
 	}
 	return { enabled: (parsed as { enabled: boolean }).enabled };
 }
@@ -90,31 +112,109 @@ async function writeVoiceMode(stateFilePath: string, enabled: boolean): Promise<
 	}
 }
 
+function isProcessAlive(pid: number): boolean {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch (error) {
+		return !isErrorCode(error, "ESRCH");
+	}
+}
+
+async function removeStaleLock(lockFilePath: string): Promise<void> {
+	let lockStats;
+	try {
+		lockStats = await stat(lockFilePath);
+	} catch (error) {
+		if (isErrorCode(error, "ENOENT")) return;
+		throw error;
+	}
+	if (Date.now() - lockStats.mtimeMs < LOCK_STALE_MS) return;
+
+	let lockOwnerIsAlive = false;
+	try {
+		const lockRecord = JSON.parse(await readFile(lockFilePath, "utf8")) as Partial<LockRecord>;
+		lockOwnerIsAlive = typeof lockRecord.pid === "number" && isProcessAlive(lockRecord.pid);
+	} catch {
+		lockOwnerIsAlive = false;
+	}
+	if (!lockOwnerIsAlive) await rm(lockFilePath, { force: true });
+}
+
+async function withStateLock<T>(stateFilePath: string, operation: () => Promise<T>): Promise<T> {
+	const lockFilePath = `${stateFilePath}.lock`;
+	const deadline = Date.now() + LOCK_TIMEOUT_MS;
+	const token = randomUUID();
+	await mkdir(dirname(stateFilePath), { recursive: true });
+
+	let lockHandle;
+	while (!lockHandle) {
+		try {
+			const candidateHandle = await open(lockFilePath, "wx", 0o600);
+			try {
+				await candidateHandle.writeFile(JSON.stringify({ token, pid: process.pid, createdAt: Date.now() }));
+				lockHandle = candidateHandle;
+			} catch (error) {
+				await candidateHandle.close().catch(() => undefined);
+				await rm(lockFilePath, { force: true }).catch(() => undefined);
+				throw error;
+			}
+		} catch (error) {
+			if (!isErrorCode(error, "EEXIST")) throw error;
+			await removeStaleLock(lockFilePath);
+			if (Date.now() >= deadline) throw new Error("Timed out waiting for pi-voice-mode state lock");
+			await delay(LOCK_RETRY_MS + Math.floor(Math.random() * LOCK_RETRY_MS));
+		}
+	}
+
+	try {
+		return await operation();
+	} finally {
+		await lockHandle.close();
+		try {
+			const currentLock = JSON.parse(await readFile(lockFilePath, "utf8")) as Partial<LockRecord>;
+			if (currentLock.token === token) await rm(lockFilePath, { force: true });
+		} catch (error) {
+			if (!isErrorCode(error, "ENOENT")) throw error;
+		}
+	}
+}
+
+function errorSignature(error: unknown): string {
+	if (error instanceof Error) return `${error.name}:${error.message}`;
+	return String(error);
+}
+
 export default function registerVoiceMode(pi: ExtensionAPI, options: VoiceModeOptions = {}): void {
 	const stateFilePath = options.stateFilePath ?? getDefaultStateFilePath();
 	const reportError = options.reportError ?? ((message, error) => console.error(message, error));
-	let isVoiceEnabled = false;
+	let lastReportedError: string | undefined;
 
-	function updateStatus(ctx: ExtensionContext): void {
-		const icon = isVoiceEnabled ? ENABLED_ICON : DISABLED_ICON;
-		const color = isVoiceEnabled ? "accent" : "dim";
+	function updateStatus(ctx: ExtensionContext, enabled: boolean): void {
+		const icon = enabled ? ENABLED_ICON : DISABLED_ICON;
+		const color = enabled ? "accent" : "dim";
 		ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg(color, icon));
 	}
 
-	function reportStateError(ctx: ExtensionContext, error: unknown): void {
+	function reportStateError(ctx: ExtensionContext, error: unknown, deduplicate = true): void {
+		const signature = errorSignature(error);
+		if (deduplicate && signature === lastReportedError) return;
+		lastReportedError = signature;
 		reportError(`[pi-voice-mode] 无法读取或保存状态文件：${stateFilePath}`, error);
 		ctx.ui.notify(ERROR_ICON, "warning");
 	}
 
 	async function refreshFromDisk(ctx: ExtensionContext): Promise<boolean> {
 		try {
-			isVoiceEnabled = await readVoiceMode(stateFilePath);
+			const enabled = await readVoiceMode(stateFilePath);
+			lastReportedError = undefined;
+			updateStatus(ctx, enabled);
+			return enabled;
 		} catch (error) {
-			isVoiceEnabled = false;
 			reportStateError(ctx, error);
+			updateStatus(ctx, false);
+			return false;
 		}
-		updateStatus(ctx);
-		return isVoiceEnabled;
 	}
 
 	pi.registerCommand("voice", {
@@ -126,20 +226,30 @@ export default function registerVoiceMode(pi: ExtensionAPI, options: VoiceModeOp
 			}
 
 			try {
-				const nextState = !(await readVoiceMode(stateFilePath));
-				await writeVoiceMode(stateFilePath, nextState);
-				isVoiceEnabled = nextState;
-				updateStatus(ctx);
+				const nextState = await withStateLock(stateFilePath, async () => {
+					let currentState: boolean;
+					try {
+						currentState = await readVoiceMode(stateFilePath);
+					} catch (error) {
+						if (!(error instanceof InvalidStateError)) throw error;
+						reportStateError(ctx, error);
+						currentState = false;
+					}
+					const next = !currentState;
+					await writeVoiceMode(stateFilePath, next);
+					return next;
+				});
+				lastReportedError = undefined;
+				updateStatus(ctx, nextState);
 				ctx.ui.notify(nextState ? ENABLED_ICON : DISABLED_ICON, "info");
 			} catch (error) {
-				reportStateError(ctx, error);
-				updateStatus(ctx);
+				reportStateError(ctx, error, false);
+				await refreshFromDisk(ctx);
 			}
 		},
 	});
 
 	pi.on("session_start", async (_event, ctx) => {
-		isVoiceEnabled = false;
 		await refreshFromDisk(ctx);
 	});
 
