@@ -39,7 +39,7 @@
   },
   "pi": {
     "extensions": [
-      "./extensions/voice-mode.ts"
+      "./extensions/usage-entry.ts"
     ]
   },
   "publishConfig": {
