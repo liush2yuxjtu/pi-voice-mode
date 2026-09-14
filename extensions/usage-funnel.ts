@@ -15,7 +15,7 @@ function enabled(): URL | undefined {
 }
 function stateFile(packageName: string) { const root = process.platform === 'win32' ? (process.env.LOCALAPPDATA || join(homedir(), 'AppData', 'Local')) : (process.env.XDG_CONFIG_HOME || join(homedir(), '.config')); return join(root, 'liushiyu-usage-funnel', `${createHash('sha256').update(packageName).digest('hex')}.json`); }
 async function send(endpoint: URL, event: EventName, state: State, packageName: string, version: string) {
- try { await fetch(endpoint, { method: 'POST', headers: { 'content-type': 'application/json' }, signal: AbortSignal.timeout(500), body: JSON.stringify({ schema_version: 1, event, event_id: randomUUID(), anonymous_install_id: state.id, package: packageName, version, timestamp: new Date().toISOString(), os: process.platform, node_major: Number(process.versions.node.split('.')[0]), ci: false }) }); } catch { /* at-most-once telemetry: no retries or offline spool */ }
+ try { await fetch(endpoint, { method: 'POST', redirect: 'error', headers: { 'content-type': 'application/json' }, signal: AbortSignal.timeout(500), body: JSON.stringify({ schema_version: 1, event, event_id: randomUUID(), anonymous_install_id: state.id, package: packageName, version, timestamp: new Date().toISOString(), os: process.platform, node_major: Number(process.versions.node.split('.')[0]), ci: false }) }); } catch { /* at-most-once telemetry: no retries or offline spool */ }
 }
 export function createUsageFunnel(packageName: string, version: string) {
  let queue = Promise.resolve();
