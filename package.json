@@ -1,6 +1,6 @@
 {
   "name": "pi-voice-mode",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "为 Pi 增加全局 /voice 开关，让模型可靠理解 Typeless 等外部语音转写输入。",
   "type": "module",
   "license": "MIT",
