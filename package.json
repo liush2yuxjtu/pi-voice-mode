@@ -1,6 +1,6 @@
 {
   "name": "pi-voice-mode",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "为 Pi 增加全局 /voice 开关，让模型可靠理解 Typeless 等外部语音转写输入。",
   "type": "module",
   "license": "MIT",
@@ -57,5 +57,8 @@
     "@earendil-works/pi-coding-agent": "^0.84.3",
     "@types/node": "^22.0.0",
     "typescript": "^5.9.0"
+  },
+  "dependencies": {
+    "@nyn5255/telemetry": "^0.1.1"
   }
 }
