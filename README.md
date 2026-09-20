@@ -70,7 +70,7 @@ pi install git:github.com/liush2yuxjtu/pi-voice-mode
 - 不录制或保存音频。
 - 不调用 Typeless 接口。
 - 不发送语音内容、转写文本、prompt、模型输出、路径、token、邮箱或用户名。
-- 可选匿名 usage funnel 默认关闭；只有同时设置 `PI_USAGE_TELEMETRY=1`、`PI_USAGE_TELEMETRY_PRIVACY_ACK=1` 和 HTTPS `PI_USAGE_TELEMETRY_ENDPOINT` 时才发送。
+- 可选匿名 usage funnel 默认关闭；只有同时设置 `PI_USAGE_TELEMETRY=1` 和 `PI_USAGE_TELEMETRY_PRIVACY_ACK=1` 时才发送。默认 collector 是 `https://telemetry-peach.vercel.app/api/events`，可用 `PI_USAGE_TELEMETRY_ENDPOINT` 覆盖。
 - `DO_NOT_TRACK=1` 或 `PI_TELEMETRY_DISABLED=1` 会强制关闭；CI 环境也不会发送。
 
 语音模式本身只在本地保存零字节的切换事件，并在开启时调整 Pi 的系统提示。当前状态由事件数量的奇偶性决定，因此多个 Pi 会话同时执行 `/voice` 也不会相互覆盖。状态目录默认为：
@@ -83,7 +83,7 @@ pi install git:github.com/liush2yuxjtu/pi-voice-mode
 
 ### 可选 usage funnel
 
-明确 opt-in 后，只发送这些匿名事件：`first_install`、`first_launch`、`first_success`、`returning_user`、`weekly_active`。`first_success` 只有在语音模式真正参与一次 agent turn 时才记录，单纯切换 `/voice` 不算成功。
+明确 opt-in 后，只发送这些匿名事件：`install`、`activated`、`first_success`、`d7_retained`、`weekly_active`。`first_success` 只有在语音模式真正参与一次 agent turn 时才记录，单纯切换 `/voice` 不算成功；`d7_retained` 只在首次成功后的第 7–8 天再次真实成功时产生。
 
 事件字段限制为事件名、随机匿名安装 ID、公开包名/版本、时间、操作系统、Node 主版本和 CI 布尔值；不会附带任意文本。funnel 去重状态保存在系统用户配置目录下的 `liushiyu-usage-funnel/` JSON 文件中。网络发送只允许显式配置的 HTTPS endpoint，拒绝重定向，单次尝试有短超时，不维护离线待发队列。
 
