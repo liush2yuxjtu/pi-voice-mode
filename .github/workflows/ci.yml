@@ -1,8 +1,8 @@
 name: 持续验证
 
+# Pre-PR checks moved to local /verify; manual fallback only.
 on:
-  push:
-  pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
