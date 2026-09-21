@@ -22,8 +22,10 @@ export function createUsageFunnel(packageName: string, version: string) {
   });
 
   return {
-    async launch(): Promise<void> {
-      await telemetry.install();
+    install(): Promise<void> {
+      return telemetry.install();
+    },
+    async activate(): Promise<void> {
       await telemetry.activated();
       await telemetry.active();
     },
