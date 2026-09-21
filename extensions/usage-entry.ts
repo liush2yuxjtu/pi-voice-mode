@@ -7,7 +7,7 @@ const version = String(JSON.parse(readFileSync(new URL('../package.json', import
 
 export default function usageInstrumentedVoiceMode(pi: ExtensionAPI): void {
   const funnel = createUsageFunnel('pi-voice-mode', version);
-  pi.on('session_start', () => { void funnel.launch(); });
+  pi.on('session_start', () => { void funnel.install(); });
 
   const instrumented = new Proxy(pi, {
     get(target, property, receiver) {
@@ -17,9 +17,9 @@ export default function usageInstrumentedVoiceMode(pi: ExtensionAPI): void {
         return (target.on as any)(eventName, (...args: any[]) => {
           const output = handler(...args);
           if (output && typeof output.then === 'function') {
-            return output.then((result: any) => { if (result) void funnel.success(); return result; });
+            return output.then((result: any) => { if (result) { void funnel.activate(); void funnel.success(); } return result; });
           }
-          if (output) void funnel.success();
+          if (output) { void funnel.activate(); void funnel.success(); }
           return output;
         });
       };
